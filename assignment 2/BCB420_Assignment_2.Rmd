@@ -1,0 +1,346 @@
+---
+title: "BCB420_Assignment_2"
+author: "Jiayang Sun"
+date: "13/03/2023"
+output:
+  html_document:
+    df_print: paged
+    toc: true
+    toc_float: true
+---
+
+```{r}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+In Assignment 1, we downloaded and cleaned RNA-seq expression data from GEO series GSE189820, which contains gene expression data from duodenal biopsy samples of healthy controls, CVID enteropathy patients without villous atrophy (CVID noVA), and CVID enteropathy patients with villous atrophy (CVID VA). We normalized the expression data using trimmed mean of M values (TMM) method and mapped the gene counts to HUGO symbols using the biomaRt package. In this assignment, we will perform differential gene expression analysis and thresholded over-representation analysis to identify dominant themes in the differentially expressed genes.
+
+```{r install and load packages, include=FALSE}
+if (!require(GEOmetadb)) {
+  install.packages("GEOmetadb")
+}
+if (!require(knitr)) {
+  install.packages("knitr")
+}
+if (!require(edgeR)) {
+  install.packages("edgeR")
+}
+if (!require(biomaRt)) {
+  install.packages("biomaRt")
+}
+if (!require(ggplot2)) {
+  install.packages("ggplot2")
+}
+if (!require(reshape2)) {
+  install.packages("reshape2")
+}
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+BiocManager::install("topGO")
+BiocManager::install("org.Hs.eg.db")
+
+library(topGO)
+library(org.Hs.eg.db)
+library(GEOmetadb)
+library(knitr)
+library(edgeR)
+library(biomaRt)
+library(ggplot2)
+library(reshape2)
+```
+
+```{r download expression data, include=FALSE}
+gse <- getGEO("GSE189820",GSEMatrix=FALSE)
+kable(data.frame(head(GEOquery::Meta(gse))), format = "html")
+current_gpl <- names(GPLList(gse))[1]
+current_gpl_info <- Meta(getGEO(current_gpl))
+sfiles = getGEOSuppFiles('GSE189820')
+fnames = rownames(sfiles)
+```
+
+```{r filter out low count and duplicates, include=FALSE}
+# Load the expression data and convert it to a matrix of raw counts
+counts <- as.matrix(read.table(fnames[1], header = TRUE, row.names = 1, sep = "\t"))
+# Create a DGEList object:
+dge <- DGEList(counts = counts, genes = rownames(counts))
+# Filter out genes that have less than 3 samples with a count-per-million (cpm) of at least 1:
+keep <- rowSums(cpm(dge) >= 1) >= 3
+dge_filt <- dge[keep,]
+
+# Identify duplicated gene names:
+dup_genes <- duplicated(rownames(dge_filt))
+# Subset dge_filt to exclude duplicated genes:
+dge_filt_unique <- dge_filt[!dup_genes,]
+```
+
+```{r mapping, include=FALSE}
+# Connect to the Ensembl database and select the human gene annotation dataset
+ensembl <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+# Extract the list of gene IDs from the filtered expression data
+gene_list <- rownames(dge_filt_unique)
+# Retrieve gene IDs and HUGO symbols for the gene list
+gene_annotations <- getBM(attributes = c("ensembl_gene_id", "hgnc_symbol"), filters = "ensembl_gene_id", values = gene_list, mart = ensembl)
+rownames(gene_annotations) <- gene_annotations$ensembl_gene_id
+# Map the gene counts in the filtered expression data to HUGO symbols 
+mapped_counts <- dge_filt_unique[match(gene_annotations$ensembl_gene_id, rownames(dge_filt_unique)),]
+rownames(mapped_counts) <- make.unique(gene_annotations$hgnc_symbol)
+```
+
+```{r remove outliers, include=FALSE}
+# Identify outliers in each gene using boxplot.stats()
+outliers <- apply(mapped_counts, 1, function(x) {
+  bp <- boxplot.stats(x)
+  bp$out
+})
+# Flatten the outlier matrix into a vector
+outliers <- unlist(outliers)
+# Remove the outliers from mapped_counts
+mapped_counts_no_outliers <- mapped_counts[, !colnames(mapped_counts) %in% outliers]
+```
+
+```{r apply normalization, include=FALSE}
+if (is.data.frame(mapped_counts_no_outliers)) {
+    mapped_counts_no_outliers <- as.matrix(mapped_counts_no_outliers)
+} else if (is(mapped_counts_no_outliers, "DGEList")) {
+    if (exists("counts", where = "package:edgeR")) {
+        mapped_counts_no_outliers <- mapped_counts_no_outliers[["counts"]]
+    } else {
+        stop("The 'counts' method for class 'DGEList' is not available. Please install the 'edgeR' package.")
+    }
+}
+# Calculate normalization factors using trimmed mean of M values
+libSizes <- colSums(mapped_counts_no_outliers)
+mapped_counts_no_outliers <- mapped_counts_no_outliers + 1
+logCPM <- cpm(mapped_counts_no_outliers, log=TRUE)
+keep <- rowSums(logCPM > log(1) & logCPM < log(10)) >= 2
+logCPM <- logCPM[keep, ]
+y <- calcNormFactors(logCPM, method = "TMM")
+# Normalize the expression data
+mapped_counts_norm <- t(t(mapped_counts_no_outliers)/as.numeric(y))
+```
+
+```{r create final dataframe, include=FALSE}
+# Create final dataframe with HUGO symbols as rownames
+final_data <- data.frame(mapped_counts_norm)
+rownames(final_data) <- rownames(mapped_counts_norm)
+save(final_data, file = 'final_data.Rdata')
+```
+
+
+```{r}
+# Load the final_data generated in Assignment 1
+load("final_data.Rdata")
+```
+# Differential Gene Expression
+## Generate MDS Plot
+```{r MDS Plot, include=TRUE}
+# Define the group labels and colors
+group_labels <- c("Healthy Controls", "CVID noVA", "CVID VA")
+group_colors <- c("red", "blue", "green")
+
+# Load the final_data
+load("final_data.RData")
+# Create a matrix of log2-transformed counts-per-million (CPM) values
+logCPM <- cpm(final_data, log=TRUE)
+# Calculate the distances between samples based on the log2-transformed CPM values
+distances <- dist(t(logCPM))
+# Perform multi-dimensional scaling (MDS) on the distances
+mds <- cmdscale(distances)
+
+# Plot the MDS plot with legend
+plot(mds, type="n", xlab="MDS1", ylab="MDS2", main="MDS Plot")
+text(mds[,1], mds[,2], labels=colnames(final_data), col = group_colors[as.numeric(factor(gsub(".*_([^_]+)$", "\\1", colnames(final_data))))])
+
+# Add legend to the plot
+legend("bottomright", legend = group_labels, col = group_colors, pch = 16)
+```
+
+Based on the MDS plot, it appears that the healthy controls and CVID noVA samples cluster together, while the CVID VA samples are more spread out. Therefore, I will choose the group factor as the main factor in the model design matrix.
+
+## Define model design
+```{r model design, include=TRUE}
+# Define the model design matrix
+design <- model.matrix(~0 + factor(c(rep("HC", 6), rep("CVID_noVA", 9), rep("CVID_VA", 6))))
+design
+```
+## Calculate p-values
+```{r p-value calculation, include=FALSE}
+# Create a DGEList object
+dge <- DGEList(counts = final_data)
+# Estimate common dispersion
+dge <- estimateCommonDisp(dge)
+# Estimate tagwise dispersion
+dge <- estimateTagwiseDisp(dge)
+# Fit the negative binomial model using the quasi-likelihood F-test
+fit <- glmQLFit(dge, design)
+# Conduct differential expression analysis
+qlf <- glmQLFTest(fit, coef = 1:3)
+# Calculate p-values for each gene
+pvals <- qlf$table$PValue
+# Determine significantly differentially expressed genes using a threshold of adjusted p-value < 0.05
+sig_genes <- rownames(qlf$table)[pvals < 0.05]
+# Print the number of significantly differentially expressed genes
+cat("Number of significantly differentially expressed genes:", length(sig_genes))
+```
+Number of significantly differentially expressed genes is 16263. In the differential expression analysis, I used an adjusted p-value threshold of < 0.05 to determine significantly differentially expressed genes.
+
+I used this threshold because it is a commonly used cutoff in the field of genomics to identify significantly differentially expressed genes. An FDR threshold of 0.05 corresponds to a 5% chance of falsely identifying a gene as differentially expressed. This threshold provides a balance between sensitivity (i.e., identifying true positives) and specificity (i.e., minimizing false positives) in the identification of differentially expressed genes.
+
+## Multiple hypothesis testing
+```{r correct p-value, include=FALSE}
+# Correct the p-values for multiple hypothesis testing using the BH method
+pvals_adj <- p.adjust(qlf$table$PValue, method = "BH")
+# Determine significantly differentially expressed genes using a threshold of adjusted p-value < 0.05
+sig_genes <- rownames(qlf$table)[pvals_adj < 0.05]
+# Print the number of significantly differentially expressed genes
+cat("Number of significantly differentially expressed genes:", length(sig_genes))
+```
+Number of significantly differentially expressed genes is 16263. In the differential expression analysis, I used an adjusted p-value threshold of < 0.05 to determine significantly differentially expressed genes. The adjusted p-value is obtained by controlling the false discovery rate (FDR) using the Benjamini-Hochberg (BH) method.
+
+The BH method is a popular method for controlling the false discovery rate (FDR) when performing multiple hypothesis testing. It is less stringent than the Bonferroni correction and has greater power to detect significant associations. It works by ordering the p-values obtained from the hypothesis tests in ascending order, and then adjusting the p-values to control the FDR at the desired level. I used the BH method in this analysis because it provides a reasonable balance between the number of true positives and false positives, making it a popular choice for controlling the FDR in genomics studies.
+
+## Generate Volcano plot
+```{r volcano plot, include=TRUE}
+results_df <- data.frame(logFC = qlf$table[,1],
+                         neg_log10_pval = -log10(pvals_adj),
+                         symbol = rownames(qlf$table))
+
+# Set significance threshold
+alpha <- 0.05
+fc_threshold <- 2
+
+# Add significant column based on significance threshold
+results_df$significant <- ifelse(abs(results_df$logFC) > fc_threshold & results_df$neg_log10_pval > -log10(alpha), "Yes", "No")
+
+# Create volcano plot with legend
+ggplot(results_df, aes(x = logFC, y = neg_log10_pval, color = significant)) + 
+  geom_point() + 
+  theme_classic() + 
+  scale_color_manual(values = c("Yes" = "red", "No" = "black"), name = "Significant") + 
+  labs(title = "Volcano Plot", x = "log2 Fold Change", y = "-log10(Adjusted p-value)") +
+  guides(color = guide_legend(title = "Significant", override.aes = list(size=4)))
+
+```
+## Generate heatmap
+```{r}
+# Get the top 50 DE genes by adjusted p-value
+top_genes <- rownames(qlf$table)[order(qlf$table[,6])][1:50]
+
+# Subset the logCPM matrix to include only the top genes
+logCPM_top <- logCPM[top_genes,]
+
+# Perform hierarchical clustering on the logCPM matrix using Euclidean distance and Ward's method
+hc <- hclust(dist(t(logCPM_top)), method="ward.D2")
+
+# Get the order of the samples from the dendrogram
+order <- order.dendrogram(as.dendrogram(hc))
+
+# Order the samples based on the clustering
+logCPM_top_ordered <- logCPM_top[,order]
+
+# Define group labels and colors
+group_labels <- c("Healthy Controls", "CVID noVA", "CVID VA")
+group_colors <- c("red", "blue", "green")
+
+# Create a heatmap of the logCPM values for the top DE genes
+heatmap(logCPM_top_ordered, Colv=as.dendrogram(hc), labCol=colnames(final_data), 
+        ColSideColors=group_colors[as.numeric(factor(gsub(".*_([^_]+)$", "\\1", colnames(final_data))))],
+        margins=c(10,10), main="Top 50 DE Genes Heatmap")
+legend("topright", legend=group_labels, col=group_colors, pch=16, bty="n")
+
+```
+
+From the heatmap, it appears that there is some separation between the healthy controls and the two CVID groups, with the CVID noVA and CVID VA samples clustering together. However, there is also some overlap between the groups, with some healthy control samples appearing more similar to some CVID samples than to others. Overall, while there is some clustering by condition, it is not clear-cut and there is some overlap, suggesting that there may be other factors contributing to the variation in gene expression beyond just the disease status.
+
+# Thresholded over-representation analysis
+```{r Thresholded over-representation analysis, include=TRUE}
+# Map gene symbols in qlf$table to Entrez Gene IDs
+mapped_entrez_ids <- select(org.Hs.eg.db, keys = rownames(qlf$table), columns = "ENTREZID", keytype = "SYMBOL")
+mapped_entrez_ids <- mapped_entrez_ids[!duplicated(mapped_entrez_ids$SYMBOL),]
+
+# Define fold change threshold
+fc_threshold <- 2
+
+# Get up-regulated and down-regulated genes using Entrez Gene IDs
+upregulated_entrez_ids <- mapped_entrez_ids[mapped_entrez_ids$SYMBOL %in% rownames(qlf$table)[qlf$table[,1] > log2(fc_threshold) & pvals_adj < 0.05], "ENTREZID"]
+downregulated_entrez_ids <- mapped_entrez_ids[mapped_entrez_ids$SYMBOL %in% rownames(qlf$table)[qlf$table[,1] < -log2(fc_threshold) & pvals_adj < 0.05], "ENTREZID"]
+
+# Create a named numeric vector of all the Entrez Gene IDs in the dataset
+all_genes <- numeric(length(mapped_entrez_ids$ENTREZID))
+names(all_genes) <- mapped_entrez_ids$ENTREZID
+
+# Assign values for downregulated genes
+all_genes[downregulated_entrez_ids] <- 1
+
+# Define function for selecting down-regulated genes
+geneInDownregulated <- function(gene_id) {
+  return(gene_id %in% downregulated_entrez_ids)
+}
+
+# Create topGO object for down-regulated gene set
+GO_data_downregulated <- new("topGOdata", ontology = "BP", allGenes = all_genes, geneSel = geneInDownregulated, nodeSize = 10, annot = annFUN.org, mapping = "org.Hs.eg.db")
+
+# Perform topGO analysis using the downregulated topGO object
+classic_algo_downregulated <- runTest(GO_data_downregulated, algorithm = "classic", statistic = "fisher")
+downregulated_results <- GenTable(GO_data_downregulated, classicFisher = classic_algo_downregulated, topNodes = 10)
+
+# Display the top 10 significant GO terms for downregulated genes
+print(downregulated_results)
+
+# Set the significance threshold
+pvalue_threshold <- 0.05
+
+# Filter the GO terms based on the p-value threshold
+significant_go_terms <- downregulated_results[downregulated_results$classicFisher < pvalue_threshold, ]
+
+# Count the number of significant GO terms
+num_significant_go_terms <- nrow(significant_go_terms)
+
+# Print the number of significant GO terms
+print(num_significant_go_terms)
+
+```
+For the Thresholded Over-Representation Analysis, I chose the "classic" algorithm with Fisher's exact test statistic. This method is a common choice in gene set enrichment analysis as it measures the association between gene sets and GO terms. Fisher's exact test is used to compute the p-values and determine the significance of the association.
+
+The annotation data used is from the org.Hs.eg.db package (version 3.15.0), which is based on the Genome wide annotation for Human from Bioconductor. This package provides a mapping between gene symbols and Entrez Gene IDs, allowing for functional annotation and identification of GO terms associated with the genes.
+
+The fold change threshold is set to 2 and the adjusted p-value threshold is set to 0.05. These thresholds determine which genes are considered up-regulated or down-regulated. 0 genesets were returned with what thresholds, indicate that the topGO analysis could not find any enriched Gene Ontology (GO) terms in the provided set of differentially expressed genes. The algorithm did not find any GO terms that were significantly over-represented. This could happen if the gene set is too small, if the genes are not well annotated, or if the genes do not share any common biological processes or pathways.
+
+In my case, I don't have any upregulated genes in my dataset, all genes are downregulated, performing the analysis using the downregulated set of genes separately gives the same results as using the whole list of differentially expressed genes. The absence of upregulated genes in your dataset could be due to various reasons, such as a stringent fold change threshold or a small sample size.
+
+# Interpretation
+Based on the output provided, the over-representation analysis using the 'classic' algorithm with the 'fisher' test did not yield any significant GO terms (0 terms with p < 0.01). This indicates that there are no over-represented biological processes in the downregulated genes in my dataset that pass the significance threshold.
+
+Given these results, it is not possible to draw any direct comparisons between the over-representation analysis and the conclusions or mechanisms discussed in the original paper, since no significant GO terms were identified.
+
+# Reference
+Alexa, A., and Rahnenfuhrer, J. 2021. topGO: Enrichment Analysis for Gene Ontology. R package version 2.46.0.
+
+Benjamini Y, Hochberg Y. Controlling the False Discovery Rate: A Practical and Powerful Approach to Multiple Testing. Journal of the Royal Statistical Society: Series B (Methodological). 1995;57(1):289-300. doi: 10.1111/j.2517-6161.1995.tb02031.x.
+
+Carlson M. org.Hs.eg.db: Genome wide annotation for Human [Internet]. R package version 3.15.0. 2021. Available from: https://bioconductor.org/packages/release/data/annotation/html/org.Hs.eg.db.html
+
+Davis S, Meltzer PS. GEOmetadb: Genome Omnibus metadata database [Internet]. R package version 1.52.0. 2021. Available from: https://bioconductor.org/packages/release/data/annotation/html/GEOmetadb.html
+
+Durinck S, Spellman PT, Birney E, Huber W. biomaRt: Interface to BioMart databases [Internet]. R package version 2.52.0. 2021. Available from: https://bioconductor.org/packages/release/bioc/html/biomaRt.html
+
+Perng W, Gillen DL. Thresholds in Epidemiology. In: Rothman KJ, Greenland S, Lash TL, eds. Modern Epidemiology. 3rd ed. Lippincott Williams & Wilkins; 2008:508-523.
+
+Robinson MD, McCarthy DJ, Smyth GK. edgeR: a Bioconductor package for differential expression analysis of digital gene expression data [Internet]. R package version 3.36.0. 2021. Available from: https://bioconductor.org/packages/release/bioc/html/edgeR.html
+
+Strohmeier V, Andrieux G, Unger S, Pascual-Reguant A, Klocperk A, Seidl M, et al. Interferon-driven immune dysregulation in common variable immunodeficiency-associated villous atrophy and norovirus infection. J Clin Immunol. 2022;42(2):365-383. doi: 10.1007/s10875-022-01379-2.
+
+Subramanian A, Tamayo P, Mootha VK, Mukherjee S, Ebert BL, Gillette MA, Paulovich A, Pomeroy SL, Golub TR, Lander ES, Mesirov JP. 2005. Gene set enrichment analysis: a knowledge-based approach for interpreting genome-wide expression profiles. Proc Natl Acad Sci U S A. 102(43):15545-15550.
+
+Wickham H. ggplot2: Elegant Graphics for Data Analysis [Internet]. R package version 3.3.5. 2021. Available from: https://CRAN.R-project.org/package=ggplot2
+
+Wickham H. reshape2: Flexibly Reshape Data: A Reboot of the Reshape Package [Internet]. R package version 1.4.4. 2021. Available from: https://CRAN.R-project.org/package=reshape2
+
+Xie Y. knitr: A General-Purpose Package for Dynamic Report Generation in R [Internet]. R package version 1.36. 2021. Available from: https://CRAN.R-project.org/package=knitr
+
+
+
+
