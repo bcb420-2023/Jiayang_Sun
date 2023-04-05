@@ -319,41 +319,6 @@ formatted_results_VA <- gsea_results_CVID_VA_vs_HC %>%
 # Write the formatted results to a file
 output_file <- "gsea_results_VA_formatted.txt"
 write.table(formatted_results_VA, file = output_file, sep = "\t", row.names = FALSE, quote = FALSE)
-
-# Get all GO IDs associated with human genes
-all_go_terms <- select(org.Hs.eg.db, keys = keys(org.Hs.eg.db), columns = c("GO", "ONTOLOGY"), keytype = "ENTREZID")
-# Filter for only biological process terms
-bp_go_terms <- all_go_terms[all_go_terms$ONTOLOGY == "BP", , drop = FALSE]
-# Remove rows with NAs
-bp_go_terms <- na.omit(bp_go_terms)
-# Create a list with GO terms as keys and associated gene sets as values
-go_gene_sets <- split(bp_go_terms$ENTREZID, bp_go_terms$GO)
-# Get the names of the GO terms
-go_term_names <- select(GO.db, keys = names(go_gene_sets), columns = "TERM", keytype = "GOID")
-# Create the GMT file
-write_gmt <- function(gene_sets, term_names, file_name) {
-  # Create an empty character vector to store the lines of the GMT file
-  gmt_lines <- character()
-
-  # Iterate through each gene set
-  for (i in seq_along(gene_sets)) {
-    # Get the GO term, its name, and the associated genes
-    go_term <- names(gene_sets)[i]
-    go_name <- term_names$TERM[match(go_term, term_names$GOID)]
-    genes <- gene_sets[[i]]
-
-    # Format the line for the current gene set
-    line <- paste0(go_term, "\t", go_name, "\t", paste(genes, collapse = "\t"))
-
-    # Add the line to the GMT lines
-    gmt_lines <- c(gmt_lines, line)
-  }
-
-  # Save the GMT lines to a file
-  writeLines(gmt_lines, file_name)
-}
-gmt_file <- "GO_BP_human.gmt"
-write_gmt(go_gene_sets, go_term_names, gmt_file)
 ```
 ## Method 
 The method used for non-thresholded gene set enrichment analysis is the gseGO function from the clusterProfiler R package. This function performs gene set enrichment analysis using the Gene Ontology (GO) database. The specific ontology used here is "BP" (Biological Process). 
